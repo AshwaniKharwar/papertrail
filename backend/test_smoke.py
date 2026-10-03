@@ -1,5 +1,6 @@
 """Run with `uv run python test_smoke.py` against configured PostgreSQL."""
 
+import json
 import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,9 +23,10 @@ class FakeModels:
         item = type("Embedding", (), {"values": [1.0] + [0.0] * 767})
         return type("Result", (), {"embeddings": [item() for _ in range(count)]})()
 
-    def generate_content(self, *, contents, **kwargs):
+    def generate_content_stream(self, *, contents, **kwargs):
         assert "Retrieved excerpts:" in contents and "verification code" in contents.lower()
-        return type("Result", (), {"text": "The code is 42 [1]."})()
+        yield type("Chunk", (), {"text": "The code "})()
+        yield type("Chunk", (), {"text": "is 42 [1]."})()
 
 
 def test_rag_flow():
@@ -79,7 +81,10 @@ def test_rag_flow():
             assert tagged.status_code == 200 and tagged.json()["tags"] == ["research", "book"]
             asked = client.post(f"/documents/{doc_id}/messages", json={"question": "What is the verification code?"}, headers={"Origin": main.FRONTEND_ORIGIN})
             assert asked.status_code == 200, asked.text
-            assert asked.json()["sources"][0]["page"] == 1
+            events = [json.loads(line) for line in asked.text.splitlines()]
+            assert [event["type"] for event in events] == ["delta", "delta", "done"]
+            assert "".join(event["text"] for event in events[:-1]) == "The code is 42 [1]."
+            assert events[-1]["sources"][0]["page"] == 1
             assert len(client.get(f"/documents/{doc_id}/messages").json()) == 2
             assert client.get(f"/documents/{doc_id}/file").status_code == 200
             client.cookies.clear()
