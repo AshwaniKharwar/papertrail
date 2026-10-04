@@ -76,6 +76,19 @@ backend/
 
 Uploads are limited to 100 MB. A new document is queued until the worker extracts text, uses OCR when needed, chunks and embeds it, and marks it ready. Questions use semantic and keyword retrieval over that document's chunks; answers stream as newline-delimited JSON with page sources.
 
+## Retrieval techniques
+
+The application uses a hybrid retrieval pipeline that blends dense semantic vector search with sparse lexical search, re-ranked via Reciprocal Rank Fusion (RRF):
+
+- **Asymmetric Task Instruction Prefixing**: Chunks and questions are embedded with `gemini-embedding-2` (768 dimensions). Queries use the prefix `task: question answering | query: {question}` to optimize the embedding representation for asymmetric search, while document chunks are embedded with `title: {title} | text: {content}`.
+- **Dense Semantic Retrieval (Vector Search)**: Queries document chunk embeddings in PostgreSQL using `pgvector` with an **HNSW** (Hierarchical Navigable Small World) index configured for cosine distance (`vector_cosine_ops`). Retrieves the top 12 semantic candidates for the document.
+- **Sparse Lexical Retrieval (Full-Text Search)**: Executes native PostgreSQL full-text search (`to_tsvector` / `plainto_tsquery` in English) accelerated by a **GIN** index. Candidates are ranked using Cover Density Ranking (`ts_rank_cd`), which scores matches higher when query terms appear in close proximity. Retrieves the top 12 keyword candidates.
+- **Reciprocal Rank Fusion (RRF) Re-ranking**: Combines rankings from the semantic and lexical result sets without requiring raw score normalization. Fused scores are calculated using:
+  $$\text{Score}(d) = \sum_{m \in \{\text{semantic}, \text{lexical}\}} \frac{1}{60 + \text{rank}_m(d)}$$
+  Chunks present in both candidate sets receive combined boosts. The top 8 chunks with the highest fused score are provided as context to the LLM.
+- **Sliding-Window Chunking with Overlap**: Extracted document text is partitioned into 450-word windows with a 70-word overlap to preserve context across chunk boundaries, falling back to Gemini Vision OCR when extracted page text is sparse (< 40 characters).
+- **Document-Scoped Filtering & Source Grounding**: All search queries strictly filter by `document_id` to guarantee document isolation. Chunks retain their original page numbers, enabling the LLM to ground answers and cite exact source pages (`[1]`, `[2]`).
+
 ## Configuration and checks
 
 `FRONTEND_ORIGIN` defaults to `http://localhost:5173`. Set it to the frontend's exact origin when hosting elsewhere. Set `VITE_API_URL` in the frontend environment when the API is not at `http://localhost:8000`. `GOOGLE_REDIRECT_URI` and `GEMINI_MODEL` can also be changed in `backend/.env`.
